@@ -64,7 +64,7 @@ const (
 	// firecracker guest VM.
 	// We attach a pool of placeholder drives before the guest has started, and then
 	// patch the replace placeholder drives with drives with actual contents.
-	fcDiskPoolSize           = 8
+	fcDiskPoolSize           = 5
 	defaultHybridVSocketName = "kata.hvsock"
 
 	// This is the first usable vsock context ID. All the vsocks can use the same
@@ -73,7 +73,7 @@ const (
 
 	// This is related to firecracker logging scheme
 	fcLogFifo     = "logs.fifo"
-	fcMetricsFifo = "metrics.fifo"
+	//fcMetricsFifo = "metrics.fifo"
 
 	defaultFcConfig = "fcConfig.json"
 	// storagePathSuffix mirrors persist/fs/fs.go:storagePathSuffix
@@ -273,7 +273,8 @@ func (fc *firecracker) vmRunning() bool {
 		fc.Logger().WithError(err).Error("getting vm status failed")
 		return false
 	}
-
+	return resp.Payload.Started
+	/*
 	// Be explicit
 	switch *resp.Payload.State {
 	case models.InstanceInfoStateStarting:
@@ -286,7 +287,7 @@ func (fc *firecracker) vmRunning() bool {
 		return false
 	default:
 		return false
-	}
+	}*/
 }
 
 func (fc *firecracker) getVersionNumber() (string, error) {
@@ -367,9 +368,9 @@ func (fc *firecracker) fcInit(timeout int) error {
 		return err
 	}
 
-	if !fc.config.Debug && fc.stateful {
+	/*if !fc.config.Debug && fc.stateful {
 		args = append(args, "--daemonize")
-	}
+	}*/
 
 	//https://github.com/firecracker-microvm/firecracker/blob/master/docs/jailer.md#jailer-usage
 	//--seccomp-level specifies whether seccomp filters should be installed and how restrictive they should be. Possible values are:
@@ -395,7 +396,9 @@ func (fc *firecracker) fcInit(timeout int) error {
 	} else {
 		args = append(args,
 			"--api-sock", fc.socketPath,
-			"--config-file", fc.fcConfigPath)
+			"--config-file", fc.fcConfigPath,
+			"--seccomp-level", "0")
+		fc.Logger().WithField("exec args: ", args).Debug()
 		cmd = exec.Command(fc.config.HypervisorPath, args...)
 	}
 
@@ -609,30 +612,29 @@ func (fc *firecracker) fcSetLogger() error {
 	span, _ := fc.trace("fcSetLogger")
 	defer span.Finish()
 
-	fcLogLevel := "Error"
+	/*fcLogLevel := "Error"
 	if fc.config.Debug {
 		fcLogLevel = "Debug"
-	}
+	}*/
 
 	// listen to log fifo file and transfer error info
-	jailedLogFifo, err := fc.fcListenToFifo(fcLogFifo)
+	/*jailedLogFifo, err := fc.fcListenToFifo(fcLogFifo)
 	if err != nil {
 		return fmt.Errorf("Failed setting log: %s", err)
-	}
-
+	}*/
 	// listen to metrics file and transfer error info
+	/*
 	jailedMetricsFifo, err := fc.fcListenToFifo(fcMetricsFifo)
 	if err != nil {
 		return fmt.Errorf("Failed setting log: %s", err)
 	}
-
-	fc.fcConfig.Logger = &models.Logger{
+	*/
+	/*fc.fcConfig.Logger = &models.Logger{
 		Level:       &fcLogLevel,
-		LogFifo:     &jailedLogFifo,
-		MetricsFifo: &jailedMetricsFifo,
+		LogPath:     &jailedLogFifo,
 	}
-
-	return err
+	return err*/
+	return nil
 }
 
 func (fc *firecracker) fcListenToFifo(fifoName string) (string, error) {
@@ -646,6 +648,7 @@ func (fc *firecracker) fcListenToFifo(fifoName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	//jailedFifoPath := fcFifoPath
 
 	go func() {
 		scanner := bufio.NewScanner(fcFifo)
@@ -700,11 +703,12 @@ func (fc *firecracker) fcInitConfiguration() error {
 	if fc.config.Debug && fc.stateful {
 		fcKernelParams = append(fcKernelParams, Param{"console", "ttyS0"})
 	} else {
-		fcKernelParams = append(fcKernelParams, []Param{
-			{"8250.nr_uarts", "0"},
-			// Tell agent where to send the logs
-			{"agent.log_vport", fmt.Sprintf("%d", vSockLogsPort)},
-		}...)
+		fcKernelParams = append(fcKernelParams, Param{"console", "ttyS0"})
+		//fcKernelParams = append(fcKernelParams, []Param{
+		//	{"8250.nr_uarts", "0"},
+		//	// Tell agent where to send the logs
+		//	{"agent.log_vport", fmt.Sprintf("%d", vSockLogsPort)},
+		//}...)
 	}
 
 	kernelParams := append(fc.config.KernelParams, fcKernelParams...)
@@ -737,6 +741,8 @@ func (fc *firecracker) fcInitConfiguration() error {
 	if err := fc.fcSetLogger(); err != nil {
 		return err
 	}
+
+	fc.fcAddCryptoDev()
 
 	fc.state.set(cfReady)
 	for _, d := range fc.pendingDevices {
@@ -848,7 +854,7 @@ func (fc *firecracker) cleanupJail() {
 	fc.umountResource(fcKernel)
 	fc.umountResource(fcRootfs)
 	fc.umountResource(fcLogFifo)
-	fc.umountResource(fcMetricsFifo)
+	//fc.umountResource(fcMetricsFifo)
 	fc.umountResource(defaultFcConfig)
 	// if running with jailer, we also need to umount fc.jailerRoot
 	if fc.config.JailerPath != "" {
@@ -901,6 +907,20 @@ func (fc *firecracker) fcAddVsock(hvs types.HybridVSock) {
 	}
 
 	fc.fcConfig.Vsock = vsock
+}
+
+func (fc *firecracker) fcAddCryptoDev() {
+	span, _ := fc.trace("fcAddCryptoDev")
+	defer span.Finish()
+
+	cryptoID := "vaccel"
+	hostCryptoDev := "vaccel"
+	crypto := &models.Crypto{
+		CryptoDevID: &cryptoID,
+		HostCryptoDev:  &hostCryptoDev,
+	}
+
+	fc.fcConfig.Crypto = crypto
 }
 
 func (fc *firecracker) fcAddNetDevice(endpoint Endpoint) {
